@@ -14,7 +14,8 @@ from PyQt5.QtGui import QTextCursor
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QTextEdit, QPushButton, QLineEdit, QComboBox, QMessageBox, QCheckBox,
-                             QDialog, QTableWidget, QTableWidgetItem)  # Thêm QTableWidgetItem vào đây)
+                             QDialog, QTableWidget, QTableWidgetItem, QProgressBar,
+                             QDialogButtonBox)  # Thêm QTableWidgetItem vào đây)
 from PyQt5.QtCore import Qt, QThread, QTimer
 from pathlib import Path
 import pyautogui
@@ -29,7 +30,7 @@ import subprocess
 import webbrowser
 
 # KHAI BÁO PHIÊN BẢN HIỆN TẠI CỦA ỨNG DỤNG
-CURRENT_VERSION = "1.0.0"
+CURRENT_VERSION = "1.1.1"
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  # Tắt cảnh báo InsecureRequestWarning
 # Cấu hình logging
@@ -1767,6 +1768,27 @@ class DownloadThread(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+import json
+
+class UpdateDialog(QDialog):
+    def __init__(self, parent, title, message):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(350)
+
+        layout = QVBoxLayout(self)
+
+        self.message_label = QLabel(message)
+        self.message_label.setWordWrap(True)
+        layout.addWidget(self.message_label)
+
+        self.skip_checkbox = QCheckBox("Bỏ qua phiên bản này")
+        layout.addWidget(self.skip_checkbox)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Yes | QDialogButtonBox.No)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1850,6 +1872,12 @@ class MainWindow(QMainWindow):
         self.clear_completed_button.clicked.connect(self.clear_completed_accounts)
         layout.addWidget(self.clear_completed_button)
 
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.hide() # Ẩn đi lúc ban đầu
+        layout.addWidget(self.progress_bar)
+        # === KẾT THÚC THÊM CODE MỚI TẠI ĐÂY ===
+
         self.workers = []
         self.proxy_threads = []
         self.proxy_status = {}
@@ -1872,6 +1900,7 @@ class MainWindow(QMainWindow):
                                         f"Ứng dụng đã được cập nhật thành công lên phiên bản {CURRENT_VERSION}!")
                 os.remove(flag_file_path)
 
+        self.load_config()
         # Gọi hàm kiểm tra cập nhật
         self.check_for_updates()
 
@@ -1888,20 +1917,83 @@ class MainWindow(QMainWindow):
             latest_release = response.json()
             latest_version = latest_release["tag_name"].replace('v', '')
 
-            if latest_version > CURRENT_VERSION:
-                msg_box = QMessageBox()
-                msg_box.setIcon(QMessageBox.Information)
-                msg_box.setText(
-                    f"Đã có phiên bản mới ({latest_version})!\nBạn có muốn tự động cập nhật và khởi động lại không?")
-                msg_box.setWindowTitle("Thông báo cập nhật")
-                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            # Đọc phiên bản đã bỏ qua từ config
+            config = self.load_config_data()
+            skipped_version = config.get('skipped_version', '')
 
-                if msg_box.exec() == QMessageBox.Yes:
+            # Chỉ hiển thị thông báo nếu phiên bản mới hơn và chưa bị bỏ qua
+            if latest_version > CURRENT_VERSION and latest_version != skipped_version:
+                message = f"Đã có phiên bản mới ({latest_version})!\nPhiên bản của bạn là ({CURRENT_VERSION}).\n\nBạn có muốn cập nhật không?"
+
+                dialog = UpdateDialog(self, "Thông báo cập nhật", message)
+                result = dialog.exec_()
+
+                if result == QDialog.Accepted:
                     download_url = latest_release["assets"][0]["browser_download_url"]
                     self.start_update_process(download_url)
+                elif dialog.skip_checkbox.isChecked():
+                    self.save_skipped_version(latest_version)
 
         except Exception as e:
             print(f"Không thể kiểm tra cập nhật: {e}")
+
+    def load_config_data(self):
+        try:
+            if CONFIG_FILE.exists():
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logging.error(f"Lỗi khi đọc {CONFIG_FILE}: {e}")
+        return {}
+
+    def save_skipped_version(self, version_to_skip):
+        try:
+            config = self.load_config_data()
+            config['skipped_version'] = version_to_skip
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            logging.info(f"Đã lưu phiên bản cần bỏ qua: {version_to_skip}")
+        except Exception as e:
+            logging.error(f"Lỗi khi lưu phiên bản bỏ qua: {e}")
+
+    def load_config(self):
+        try:
+            if not CONFIG_FILE.exists():
+                default_config = {
+                    'link': '', 'proxy': '', 'account': '',
+                    'mode': 'BACARAT', 'chip': '1', 'headless': False,
+                    'skipped_version': ''  # Thêm key mới
+                }
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(default_config, f, indent=4, ensure_ascii=False)
+
+            config = self.load_config_data()
+            self.link_input.setText(config.get('link', ''))
+            self.proxy_input.setPlainText(config.get('proxy', ''))
+            self.account_input.setPlainText(config.get('account', ''))
+            self.mode_combo.setCurrentText(config.get('mode', 'BACARAT'))
+            self.chip_combo.setCurrentText(config.get('chip', '1'))
+            self.headless_checkbox.setChecked(config.get('headless', False))
+            self.previous_account_input = config.get('account', '')
+        except Exception as e:
+            logging.error(f"Lỗi khi tải config: {e}")
+
+    def save_config(self):
+        try:
+            config = self.load_config_data()
+            config.update({
+                'link': self.link_input.text().strip(),
+                'proxy': self.proxy_input.toPlainText().strip(),
+                'account': self.account_input.toPlainText().strip(),
+                'mode': self.mode_combo.currentText(),
+                'chip': self.chip_combo.currentText(),
+                'headless': self.headless_checkbox.isChecked()
+            })
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            self.previous_account_input = self.account_input.toPlainText().strip()
+        except Exception as e:
+            logging.error(f"Lỗi khi lưu config: {e}")
 
     def start_update_process(self, download_url):
         self.progress_bar.setValue(0)
